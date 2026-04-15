@@ -1,0 +1,834 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Tickets Laucirica</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/html2pdf.js/0.10.1/html2pdf.bundle.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
+        import {
+            getAuth, createUserWithEmailAndPassword, signInWithEmailAndPassword,
+            signOut, onAuthStateChanged
+        } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-auth.js";
+        import {
+            getFirestore, collection, addDoc, getDocs, deleteDoc,
+            doc, query, where, orderBy, setDoc, getDoc
+        } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js";
+
+        const firebaseConfig = {
+            apiKey: "AIzaSyAk7IwFQm6Y7XSsgYQ9nXeZzf2lF2MbIok",
+            authDomain: "tickets-laucirica.firebaseapp.com",
+            projectId: "tickets-laucirica",
+            storageBucket: "tickets-laucirica.firebasestorage.app",
+            messagingSenderId: "157218433433",
+            appId: "1:157218433433:web:4f6d24d7cdb692dd20cb08",
+            measurementId: "G-9PM85NSW0Q"
+        };
+
+        const ADMIN_CODE = "Lauciricatickets2026";
+        const DEFAULT_CATEGORIES = ['Desayuno', 'Comida', 'Aperitivo', 'Cena', 'Hotel', 'Gasolina'];
+
+        const app = initializeApp(firebaseConfig);
+        const auth = getAuth(app);
+        const db = getFirestore(app);
+
+        let tickets = [];
+        let allUsersTickets = [];
+        let allUsers = [];
+        let categories = [...DEFAULT_CATEGORIES];
+        let currentImage = null;
+        let currentUser = null;
+        let isAdmin = false;
+        let adminFilterUser = 'all';
+        let adminFilterMonth = '';
+
+        // ── Auth state ────────────────────────────────────────────────────────
+        onAuthStateChanged(auth, async (user) => {
+            if (user) {
+                currentUser = user;
+                await loadUserProfile();
+                if (isAdmin) {
+                    showAdminApp();
+                    await loadAdminData();
+                } else {
+                    showWorkerApp(user);
+                    await loadUserData();
+                }
+            } else {
+                currentUser = null;
+                isAdmin = false;
+                showAuth();
+            }
+        });
+
+        async function loadUserProfile() {
+            const snap = await getDoc(doc(db, 'users', currentUser.uid));
+            if (snap.exists()) {
+                isAdmin = snap.data().role === 'admin';
+                if (snap.data().categories) categories = snap.data().categories;
+            } else {
+                isAdmin = false;
+                categories = [...DEFAULT_CATEGORIES];
+            }
+        }
+
+        function showAuth() {
+            document.getElementById('authScreen').style.display = 'flex';
+            document.getElementById('appScreen').style.display = 'none';
+            document.getElementById('adminScreen').style.display = 'none';
+        }
+
+        function showWorkerApp(user) {
+            document.getElementById('authScreen').style.display = 'none';
+            document.getElementById('appScreen').style.display = 'block';
+            document.getElementById('adminScreen').style.display = 'none';
+            document.getElementById('userEmail').textContent = user.email;
+            setDefaultDate();
+            updateCategorySelect();
+            updateCategoryList();
+            updateStats();
+            updateTicketsList();
+        }
+
+        function showAdminApp() {
+            document.getElementById('authScreen').style.display = 'none';
+            document.getElementById('appScreen').style.display = 'none';
+            document.getElementById('adminScreen').style.display = 'block';
+            document.getElementById('adminEmail').textContent = currentUser.email;
+            const now = new Date();
+            adminFilterMonth = now.getFullYear() + '-' + String(now.getMonth()+1).padStart(2,'0');
+            document.getElementById('adminMonthFilter').value = adminFilterMonth;
+        }
+
+        // ── Auth ──────────────────────────────────────────────────────────────
+        window.switchAuthMode = function() {
+            const isLogin = document.getElementById('authTitle').textContent.includes('Iniciar');
+            document.getElementById('authTitle').textContent = isLogin ? 'Crear cuenta' : 'Iniciar sesión';
+            document.getElementById('authSubmitBtn').textContent = isLogin ? 'Registrarse' : 'Entrar';
+            document.getElementById('authSwitchText').textContent = isLogin ? '¿Ya tienes cuenta?' : '¿No tienes cuenta?';
+            document.getElementById('authSwitchLink').textContent = isLogin ? 'Iniciar sesión' : 'Registrarse';
+            document.getElementById('adminCodeGroup').style.display = isLogin ? 'block' : 'none';
+            document.getElementById('authError').style.display = 'none';
+        };
+
+        window.submitAuth = async function() {
+            const email = document.getElementById('authEmail').value.trim();
+            const password = document.getElementById('authPassword').value;
+            const adminCode = document.getElementById('adminCode').value.trim();
+            const isRegister = document.getElementById('authTitle').textContent.includes('Crear');
+            const errEl = document.getElementById('authError');
+            errEl.style.display = 'none';
+            if (!email || !password) { errEl.textContent = 'Rellena email y contraseña'; errEl.style.display = 'block'; return; }
+            try {
+                document.getElementById('authSubmitBtn').textContent = '⏳ Espera...';
+                if (isRegister) {
+                    const role = adminCode === ADMIN_CODE ? 'admin' : 'worker';
+                    const cred = await createUserWithEmailAndPassword(auth, email, password);
+                    await setDoc(doc(db, 'users', cred.user.uid), {
+                        email, role, categories: [...DEFAULT_CATEGORIES], createdAt: new Date().toISOString()
+                    });
+                } else {
+                    await signInWithEmailAndPassword(auth, email, password);
+                }
+            } catch (e) {
+                const msgs = {
+                    'auth/email-already-in-use': 'Este email ya está registrado',
+                    'auth/invalid-email': 'Email no válido',
+                    'auth/weak-password': 'La contraseña debe tener al menos 6 caracteres',
+                    'auth/invalid-credential': 'Email o contraseña incorrectos',
+                };
+                errEl.textContent = msgs[e.code] || 'Error: ' + e.message;
+                errEl.style.display = 'block';
+                document.getElementById('authSubmitBtn').textContent = isRegister ? 'Registrarse' : 'Entrar';
+            }
+        };
+
+        window.logout = async function() {
+            await signOut(auth);
+            tickets = []; allUsersTickets = []; allUsers = [];
+            categories = [...DEFAULT_CATEGORIES];
+        };
+
+        // ── Worker: cargar datos ──────────────────────────────────────────────
+        async function loadUserData() {
+            showLoading(true);
+            try {
+                const q = query(collection(db, 'tickets'), where('uid', '==', currentUser.uid), orderBy('date', 'desc'));
+                const snap = await getDocs(q);
+                tickets = snap.docs.map(d => ({ ...d.data(), firestoreId: d.id }));
+                updateStats(); updateTicketsList();
+            } catch (e) {
+                showAlert('Error cargando datos: ' + e.message, 'error');
+            } finally { showLoading(false); }
+        }
+
+        // ── Admin: cargar todos los datos ─────────────────────────────────────
+        async function loadAdminData() {
+            showLoading(true);
+            try {
+                const usersSnap = await getDocs(collection(db, 'users'));
+                allUsers = usersSnap.docs.map(d => ({ uid: d.id, ...d.data() })).filter(u => u.role !== 'admin');
+                const ticketsSnap = await getDocs(query(collection(db, 'tickets'), orderBy('date', 'desc')));
+                allUsersTickets = ticketsSnap.docs.map(d => ({ ...d.data(), firestoreId: d.id }));
+                renderAdminUserFilter();
+                renderAdminDashboard();
+            } catch (e) {
+                showAdminAlert('Error cargando datos: ' + e.message, 'error');
+            } finally { showLoading(false); }
+        }
+
+        function renderAdminUserFilter() {
+            const sel = document.getElementById('adminUserFilter');
+            sel.innerHTML = '<option value="all">👥 Todos los trabajadores</option>';
+            allUsers.forEach(u => {
+                const opt = document.createElement('option');
+                opt.value = u.uid; opt.textContent = u.email; sel.appendChild(opt);
+            });
+        }
+
+        function getFilteredAdminTickets() {
+            return allUsersTickets.filter(t => {
+                const matchUser = adminFilterUser === 'all' || t.uid === adminFilterUser;
+                const matchMonth = !adminFilterMonth || (t.date && t.date.startsWith(adminFilterMonth));
+                return matchUser && matchMonth;
+            });
+        }
+
+        function renderAdminDashboard() {
+            const filtered = getFilteredAdminTickets();
+            const total = filtered.reduce((s, t) => s + (t.price || 0), 0);
+            const byUser = {};
+            filtered.forEach(t => {
+                if (!byUser[t.uid]) byUser[t.uid] = { email: t.userEmail || t.uid, tickets: [], total: 0 };
+                byUser[t.uid].tickets.push(t);
+                byUser[t.uid].total += (t.price || 0);
+            });
+
+            document.getElementById('adminTotalTickets').textContent = filtered.length;
+            document.getElementById('adminTotalAmount').textContent = '€' + total.toFixed(2);
+            document.getElementById('adminTotalWorkers').textContent = adminFilterUser === 'all' ? Object.keys(byUser).length : 1;
+
+            const tbody = document.getElementById('adminTicketsBody');
+            if (!filtered.length) {
+                tbody.innerHTML = '<tr><td colspan="6" style="text-align:center;color:#999;padding:30px;">No hay tickets con estos filtros</td></tr>';
+            } else {
+                tbody.innerHTML = filtered.map(t => {
+                    const user = allUsers.find(u => u.uid === t.uid);
+                    const email = user ? user.email : (t.userEmail || t.uid);
+                    const date = t.date ? new Date(t.date + 'T12:00:00').toLocaleDateString('es-ES') : '-';
+                    return '<tr><td><span class="worker-badge">' + email + '</span></td><td>' + date + '</td><td><span class="cat-pill">' + (t.category||'-') + '</span></td><td>' + (t.type||'-') + '</td><td>' + (t.notes||'-') + '</td><td class="price-cell">€' + (t.price||0).toFixed(2) + '</td></tr>';
+                }).join('');
+            }
+
+            const summaryEl = document.getElementById('adminWorkerSummary');
+            if (adminFilterUser === 'all') {
+                summaryEl.innerHTML = Object.values(byUser).map(u =>
+                    '<div class="worker-summary-card"><div class="worker-email">' + u.email + '</div><div class="worker-stats"><span>' + u.tickets.length + ' tickets</span><span class="worker-total">€' + u.total.toFixed(2) + '</span></div></div>'
+                ).join('') || '<p style="color:#999;text-align:center;padding:20px;">Sin datos</p>';
+            } else {
+                summaryEl.innerHTML = '';
+            }
+        }
+
+        window.applyAdminFilters = function() {
+            adminFilterUser = document.getElementById('adminUserFilter').value;
+            adminFilterMonth = document.getElementById('adminMonthFilter').value;
+            renderAdminDashboard();
+        };
+
+        window.adminGeneratePDF = function() {
+            const filtered = getFilteredAdminTickets();
+            if (!filtered.length) { showAdminAlert('No hay tickets con estos filtros', 'error'); return; }
+            const total = filtered.reduce((s, t) => s + (t.price||0), 0);
+            const monthLabel = adminFilterMonth ? new Date(adminFilterMonth + '-01').toLocaleDateString('es-ES', { month: 'long', year: 'numeric' }) : 'Todos los períodos';
+            const userLabel = adminFilterUser === 'all' ? 'Todos los trabajadores' : (allUsers.find(u => u.uid === adminFilterUser)?.email || adminFilterUser);
+            let html = '<html><head><style>body{font-family:Arial,sans-serif;margin:20px;font-size:13px;}h1{color:#667eea;text-align:center;}.meta{text-align:center;color:#666;margin-bottom:20px;}table{width:100%;border-collapse:collapse;margin:16px 0;}th,td{border:1px solid #ddd;padding:9px;text-align:left;}th{background:#667eea;color:white;}tr:nth-child(even){background:#f9f9f9;}.total-row{background:#f0f4ff;font-weight:bold;}.footer{text-align:center;color:#aaa;font-size:11px;margin-top:30px;}</style></head><body>';
+            html += '<h1>Reporte Tickets Laucirica</h1><div class="meta"><strong>Período:</strong> ' + monthLabel + ' &nbsp;|&nbsp; <strong>Trabajador:</strong> ' + userLabel + ' &nbsp;|&nbsp; <strong>Generado:</strong> ' + new Date().toLocaleDateString('es-ES') + '</div>';
+            html += '<table><tr><th>Trabajador</th><th>Fecha</th><th>Categoría</th><th>Tipo</th><th>Notas</th><th>Importe</th></tr>';
+            filtered.forEach(t => {
+                const user = allUsers.find(u => u.uid === t.uid);
+                const email = user ? user.email : (t.userEmail || t.uid);
+                const date = t.date ? new Date(t.date + 'T12:00:00').toLocaleDateString('es-ES') : '-';
+                html += '<tr><td>' + email + '</td><td>' + date + '</td><td>' + (t.category||'-') + '</td><td>' + (t.type||'-') + '</td><td>' + (t.notes||'-') + '</td><td style="text-align:right;">€' + (t.price||0).toFixed(2) + '</td></tr>';
+            });
+            html += '<tr class="total-row"><td colspan="5" style="text-align:right;">TOTAL:</td><td style="text-align:right;">€' + total.toFixed(2) + '</td></tr></table>';
+            html += '<div class="footer">Tickets Laucirica · Informe de administración</div></body></html>';
+            const el = document.createElement('div'); el.innerHTML = html; el.style.display = 'none'; document.body.appendChild(el);
+            html2pdf().set({ margin: 10, filename: 'reporte-admin-' + (adminFilterMonth||'completo') + '.pdf', html2canvas: { scale: 2 }, jsPDF: { orientation: 'portrait', unit: 'mm', format: 'a4' } }).from(el).save();
+            setTimeout(() => document.body.removeChild(el), 500);
+            showAdminAlert('✓ PDF descargado', 'success');
+        };
+
+        window.adminExportCSV = function() {
+            const filtered = getFilteredAdminTickets();
+            if (!filtered.length) { showAdminAlert('No hay datos', 'error'); return; }
+            let csv = 'Trabajador,Fecha,Categoría,Tipo,Notas,Precio\n';
+            filtered.forEach(t => {
+                const user = allUsers.find(u => u.uid === t.uid);
+                const email = user ? user.email : (t.userEmail || t.uid);
+                csv += '"' + email + '",' + t.date + ',"' + t.category + '","' + t.type + '","' + (t.notes||'') + '",' + t.price + '\n';
+            });
+            const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+            const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = 'tickets-laucirica-' + (adminFilterMonth||'completo') + '.csv'; a.click();
+            showAdminAlert('✓ CSV descargado', 'success');
+        };
+
+        // ── Worker: operaciones ───────────────────────────────────────────────
+        async function saveCategoriesToFirestore() {
+            await setDoc(doc(db, 'users', currentUser.uid), { categories }, { merge: true });
+        }
+
+        window.addTicket = async function() {
+            const date = document.getElementById('date').value;
+            const price = parseFloat(document.getElementById('price').value);
+            const category = document.getElementById('category').value;
+            const type = document.getElementById('type').value;
+            const notes = document.getElementById('notes').value;
+            if (!date || isNaN(price) || !category || !type) { showAlert('Rellena todos los campos requeridos', 'error'); return; }
+            showLoading(true);
+            try {
+                const ticket = { id: Date.now(), date, price, category, type, notes, image: currentImage };
+                const docRef = await addDoc(collection(db, 'tickets'), { ...ticket, uid: currentUser.uid, userEmail: currentUser.email, createdAt: new Date().toISOString() });
+                ticket.firestoreId = docRef.id;
+                tickets.unshift(ticket);
+                clearForm(); updateStats(); updateTicketsList();
+                showAlert('✓ Ticket guardado en la nube', 'success');
+            } catch (e) { showAlert('Error: ' + e.message, 'error'); }
+            finally { showLoading(false); }
+        };
+
+        window.deleteTicket = async function(firestoreId) {
+            if (!confirm('¿Eliminar este ticket?')) return;
+            showLoading(true);
+            try {
+                await deleteDoc(doc(db, 'tickets', firestoreId));
+                tickets = tickets.filter(t => t.firestoreId !== firestoreId);
+                updateStats(); updateTicketsList();
+                showAlert('Ticket eliminado', 'success');
+            } catch (e) { showAlert('Error eliminando ticket', 'error'); }
+            finally { showLoading(false); }
+        };
+
+        window.addCategory = async function() {
+            const input = document.getElementById('newCategory');
+            const newCat = input.value.trim();
+            if (!newCat) { showAlert('Escribe una categoría', 'error'); return; }
+            if (categories.includes(newCat)) { showAlert('Ya existe', 'error'); return; }
+            categories.push(newCat);
+            await saveCategoriesToFirestore();
+            updateCategorySelect(); updateCategoryList();
+            input.value = ''; showAlert('Categoría añadida', 'success');
+        };
+
+        window.deleteCategory = async function(cat) {
+            if (DEFAULT_CATEGORIES.includes(cat)) { showAlert('No puedes borrar categorías predeterminadas', 'error'); return; }
+            categories = categories.filter(c => c !== cat);
+            await saveCategoriesToFirestore();
+            updateCategorySelect(); updateCategoryList();
+            showAlert('Categoría eliminada', 'success');
+        };
+
+        window.clearForm = function() {
+            document.getElementById('date').valueAsDate = new Date();
+            ['price','category','type','notes'].forEach(id => { const el = document.getElementById(id); if (el) el.value = ''; });
+            document.getElementById('imageInput').value = '';
+            document.getElementById('imagePreview').innerHTML = '';
+            document.getElementById('fileName').textContent = '';
+            document.getElementById('aiExtraction').style.display = 'none';
+            currentImage = null;
+        };
+
+        function setDefaultDate() {
+            const today = new Date().toISOString().split('T')[0];
+            const d = document.getElementById('date'); if (d) d.value = today;
+            const m = document.getElementById('monthYear'); if (m) m.value = today.substring(0,7);
+        }
+
+        function updateCategorySelect() {
+            const select = document.getElementById('category'); if (!select) return;
+            const cur = select.value;
+            select.innerHTML = '<option value="">-- Selecciona una categoría --</option>';
+            categories.forEach(cat => { const o = document.createElement('option'); o.value = cat; o.textContent = cat; select.appendChild(o); });
+            select.value = cur;
+        }
+
+        function updateCategoryList() {
+            const list = document.getElementById('categoryList'); if (!list) return;
+            list.innerHTML = '';
+            categories.forEach(cat => {
+                const div = document.createElement('div'); div.className = 'category-item';
+                div.innerHTML = '<span>' + cat + '</span>' + (!DEFAULT_CATEGORIES.includes(cat) ? '<button class="btn-danger" onclick="window.deleteCategory(\'' + cat + '\')">Eliminar</button>' : '');
+                list.appendChild(div);
+            });
+        }
+
+        function updateStats() {
+            const now = new Date();
+            const cm = now.getFullYear() + '-' + String(now.getMonth()+1).padStart(2,'0');
+            const mt = tickets.filter(t => t.date && t.date.startsWith(cm));
+            const total = mt.reduce((s, t) => s + (t.price||0), 0);
+            const safe = (id, v) => { const el = document.getElementById(id); if (el) el.textContent = v; };
+            safe('ticketCount', mt.length);
+            safe('ticketTypeCount', mt.filter(t => t.type === 'Ticket').length);
+            safe('invoiceTypeCount', mt.filter(t => t.type === 'Factura').length);
+            safe('totalAmount', '€' + total.toFixed(2));
+        }
+
+        function updateTicketsList() {
+            const now = new Date();
+            const cm = now.getFullYear() + '-' + String(now.getMonth()+1).padStart(2,'0');
+            const mt = tickets.filter(t => t.date && t.date.startsWith(cm)).sort((a,b) => new Date(b.date) - new Date(a.date));
+            const list = document.getElementById('ticketsList'); if (!list) return;
+            if (!mt.length) { list.innerHTML = '<p style="text-align:center;color:#999;padding:30px;">No hay tickets este mes</p>'; return; }
+            list.innerHTML = mt.map(t => {
+                const date = new Date(t.date + 'T12:00:00').toLocaleDateString('es-ES', { month:'short', day:'numeric' });
+                return '<div class="ticket-item ' + (t.image ? 'has-image' : '') + '"><div class="ticket-header"><span class="ticket-date">' + date + '</span><span class="ticket-category">' + t.category + '</span></div><div class="ticket-price">€' + (t.price||0).toFixed(2) + '</div><div class="ticket-type">' + t.type + '</div>' + (t.notes ? '<div style="color:#666;font-size:.86em;margin:5px 0;">' + t.notes + '</div>' : '') + '<div class="ticket-actions">' + (t.image ? '<button class="btn-view-image" onclick="window.viewImage(\`' + t.image + '\`)">📸 Ver foto</button>' : '') + '<button class="btn-danger" onclick="window.deleteTicket(\'' + t.firestoreId + '\')">🗑️ Eliminar</button></div></div>';
+            }).join('');
+        }
+
+        window.generatePDF = function() {
+            const monthYear = document.getElementById('monthYear').value;
+            if (!monthYear) { showAlert('Selecciona un mes', 'error'); return; }
+            const [year, month] = monthYear.split('-');
+            const mt = tickets.filter(t => t.date && t.date.startsWith(monthYear)).sort((a,b) => new Date(a.date)-new Date(b.date));
+            if (!mt.length) { showAlert('No hay tickets en este mes', 'error'); return; }
+            const total = mt.reduce((s,t) => s+(t.price||0), 0);
+            const monthName = new Date(year+'-'+month+'-01').toLocaleDateString('es-ES', { month:'long', year:'numeric' });
+            let html = '<html><head><style>body{font-family:Arial;margin:20px;}h1{color:#667eea;text-align:center;}table{width:100%;border-collapse:collapse;margin:20px 0;}th,td{border:1px solid #ddd;padding:10px;}th{background:#667eea;color:white;}tr:nth-child(even){background:#f9f9f9;}.total-row{background:#f0f4ff;font-weight:bold;}</style></head><body><h1>Reporte de Gastos - ' + monthName + '</h1><p style="text-align:center;color:#666;">' + currentUser.email + '</p><table><tr><th>Fecha</th><th>Categoría</th><th>Tipo</th><th>Notas</th><th>€</th></tr>';
+            mt.forEach(t => { const date = new Date(t.date+'T12:00:00').toLocaleDateString('es-ES'); html += '<tr><td>' + date + '</td><td>' + t.category + '</td><td>' + t.type + '</td><td>' + (t.notes||'-') + '</td><td style="text-align:right;">' + (t.price||0).toFixed(2) + '</td></tr>'; });
+            html += '<tr class="total-row"><td colspan="4" style="text-align:right;">TOTAL:</td><td style="text-align:right;">€' + total.toFixed(2) + '</td></tr></table><p style="text-align:center;color:#999;font-size:11px;">Generado el ' + new Date().toLocaleDateString('es-ES') + ' · Tickets Laucirica</p></body></html>';
+            const el = document.createElement('div'); el.innerHTML = html; el.style.display = 'none'; document.body.appendChild(el);
+            html2pdf().set({ margin:10, filename:'gastos-'+monthYear+'.pdf', html2canvas:{scale:2}, jsPDF:{orientation:'portrait',unit:'mm',format:'a4'} }).from(el).save();
+            setTimeout(() => document.body.removeChild(el), 500);
+            showAlert('✓ PDF descargado', 'success');
+        };
+
+        window.exportJSON = function() {
+            if (!tickets.length) { showAlert('No hay datos', 'error'); return; }
+            const blob = new Blob([JSON.stringify(tickets.map(({ firestoreId, uid, ...r }) => r), null, 2)], { type:'application/json' });
+            const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = 'tickets.json'; a.click();
+            showAlert('✓ JSON descargado', 'success');
+        };
+
+        window.exportCSV = function() {
+            if (!tickets.length) { showAlert('No hay datos', 'error'); return; }
+            let csv = 'Fecha,Categoría,Tipo,Precio,Notas\n';
+            tickets.forEach(t => { csv += t.date + ',"' + t.category + '","' + t.type + '",' + t.price + ',"' + (t.notes||'') + '"\n'; });
+            const blob = new Blob([csv], { type:'text/csv;charset=utf-8;' });
+            const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = 'tickets.csv'; a.click();
+            showAlert('✓ CSV descargado', 'success');
+        };
+
+        window.clearAllData = async function() {
+            if (!confirm('⚠️ ¿Borrar TODOS tus tickets?')) return;
+            if (!confirm('Confirma de nuevo: ¿borrar todo?')) return;
+            showLoading(true);
+            try {
+                for (const t of tickets) { if (t.firestoreId) await deleteDoc(doc(db, 'tickets', t.firestoreId)); }
+                tickets = []; updateStats(); updateTicketsList();
+                showAlert('Todos los datos eliminados', 'success');
+            } catch (e) { showAlert('Error borrando datos', 'error'); }
+            finally { showLoading(false); }
+        };
+
+        document.addEventListener('DOMContentLoaded', () => {
+            const imgInput = document.getElementById('imageInput');
+            if (imgInput) {
+                imgInput.addEventListener('change', function(e) {
+                    const file = e.target.files[0];
+                    if (file) {
+                        const reader = new FileReader();
+                        reader.onload = ev => {
+                            currentImage = ev.target.result;
+                            document.getElementById('fileName').textContent = file.name;
+                            document.getElementById('imagePreview').innerHTML = '<img src="' + currentImage + '" alt="preview" style="width:100%;max-height:200px;object-fit:cover;border-radius:6px;margin-top:8px;">';
+                            document.getElementById('aiExtraction').style.display = 'block';
+                        };
+                        reader.readAsDataURL(file);
+                    }
+                });
+            }
+        });
+
+        window.applyAIExtraction = () => showAlert('Función de IA disponible en versión premium', 'error');
+        window.viewImage = (src) => { document.getElementById('modalImage').src = src; document.getElementById('imageModal').style.display = 'block'; };
+        window.closeImageModal = () => document.getElementById('imageModal').style.display = 'none';
+        window.openCategoryModal = () => document.getElementById('categoryModal').style.display = 'block';
+        window.closeCategoryModal = () => document.getElementById('categoryModal').style.display = 'none';
+
+        window.switchTab = function(name, btn) {
+            document.querySelectorAll('.tab-content').forEach(el => el.classList.remove('active'));
+            document.querySelectorAll('.tab-btn').forEach(el => el.classList.remove('active'));
+            document.getElementById(name).classList.add('active');
+            if (btn) btn.classList.add('active');
+        };
+
+        function showLoading(show) { document.getElementById('loadingOverlay').style.display = show ? 'flex' : 'none'; }
+        function showAlert(msg, type) { const el = document.getElementById('alert'); if (!el) return; el.textContent = msg; el.className = 'alert show alert-' + type; setTimeout(() => el.classList.remove('show'), 4000); }
+        function showAdminAlert(msg, type) { const el = document.getElementById('adminAlert'); if (!el) return; el.textContent = msg; el.className = 'alert show alert-' + type; setTimeout(() => el.classList.remove('show'), 4000); }
+
+        window.addEventListener('click', e => {
+            ['categoryModal','imageModal'].forEach(id => { const m = document.getElementById(id); if (e.target === m) m.style.display = 'none'; });
+        });
+        document.addEventListener('keydown', e => {
+            if (e.key === 'Enter' && document.getElementById('authScreen').style.display !== 'none') window.submitAuth();
+        });
+    </script>
+
+    <style>
+        * { margin:0; padding:0; box-sizing:border-box; }
+        body { font-family:'Segoe UI',Tahoma,Geneva,Verdana,sans-serif; background:linear-gradient(135deg,#667eea 0%,#764ba2 100%); min-height:100vh; padding:20px; }
+
+        /* Auth */
+        #authScreen { display:flex; align-items:center; justify-content:center; min-height:100vh; position:fixed; inset:0; background:linear-gradient(135deg,#667eea 0%,#764ba2 100%); z-index:9999; }
+        .auth-box { background:white; border-radius:16px; padding:40px; width:100%; max-width:420px; box-shadow:0 25px 60px rgba(0,0,0,0.35); text-align:center; }
+        .auth-logo { font-size:3em; margin-bottom:8px; }
+        .auth-box h1 { color:#667eea; font-size:1.6em; margin-bottom:4px; }
+        .auth-subtitle { color:#999; font-size:0.9em; margin-bottom:28px; }
+        #authTitle { color:#333; font-size:1.1em; font-weight:700; margin-bottom:18px; text-align:left; }
+        .auth-input { width:100%; padding:12px 14px; border:2px solid #e9ecef; border-radius:8px; font-size:1em; margin-bottom:12px; transition:border-color 0.3s; outline:none; }
+        .auth-input:focus { border-color:#667eea; }
+        .admin-code-group { margin-bottom:12px; display:none; }
+        .admin-code-group label { display:block; font-size:0.82em; color:#888; margin-bottom:6px; text-align:left; }
+        .auth-btn { width:100%; padding:13px; background:linear-gradient(135deg,#667eea,#764ba2); color:white; border:none; border-radius:8px; font-size:1em; font-weight:700; cursor:pointer; transition:opacity 0.2s,transform 0.2s; margin-bottom:14px; }
+        .auth-btn:hover { opacity:0.9; transform:translateY(-1px); }
+        .auth-error { background:#f8d7da; color:#721c24; border:1px solid #f5c6cb; padding:10px 14px; border-radius:6px; font-size:0.88em; margin-bottom:12px; display:none; text-align:left; }
+        .auth-switch { font-size:0.88em; color:#666; }
+        .auth-switch a { color:#667eea; cursor:pointer; font-weight:600; text-decoration:none; }
+        .auth-switch a:hover { text-decoration:underline; }
+
+        /* User bar */
+        .user-bar { background:rgba(255,255,255,0.15); border-radius:8px; padding:10px 20px; display:flex; justify-content:space-between; align-items:center; margin-bottom:14px; color:white; font-size:0.9em; }
+        .btn-logout { background:rgba(255,255,255,0.2); color:white; border:1px solid rgba(255,255,255,0.4); padding:6px 14px; border-radius:6px; cursor:pointer; font-size:0.82em; font-weight:600; transition:background 0.2s; }
+        .btn-logout:hover { background:rgba(255,255,255,0.35); }
+        .admin-crown { background:#ffd700; color:#333; padding:2px 8px; border-radius:10px; font-size:0.75em; font-weight:700; margin-left:6px; }
+
+        /* Worker app */
+        #appScreen { display:none; }
+        .container { max-width:1200px; margin:0 auto; background:white; border-radius:12px; box-shadow:0 20px 60px rgba(0,0,0,0.3); overflow:hidden; }
+        .header { background:linear-gradient(135deg,#667eea 0%,#764ba2 100%); color:white; padding:28px; text-align:center; }
+        .header h1 { font-size:2em; margin-bottom:6px; }
+        .header p { opacity:0.9; font-size:0.95em; }
+        .cloud-badge { display:inline-block; background:rgba(255,255,255,0.2); border:1px solid rgba(255,255,255,0.4); color:white; font-size:0.78em; padding:3px 10px; border-radius:20px; margin-top:8px; }
+        .content { display:grid; grid-template-columns:1fr 1fr; gap:28px; padding:28px; }
+        @media (max-width:1024px) { .content { grid-template-columns:1fr; } }
+        .panel { background:#f8f9fa; border-radius:8px; padding:22px; border:2px solid #e9ecef; }
+        .panel h2 { color:#667eea; margin-bottom:18px; font-size:1.35em; border-bottom:3px solid #667eea; padding-bottom:10px; }
+        .form-group { margin-bottom:16px; }
+        .form-group label { display:block; margin-bottom:6px; color:#333; font-weight:600; font-size:0.92em; }
+        .form-group input,.form-group select,.form-group textarea { width:100%; padding:10px 12px; border:2px solid #ddd; border-radius:6px; font-size:1em; transition:border-color 0.3s; }
+        .form-group input:focus,.form-group select:focus,.form-group textarea:focus { outline:none; border-color:#667eea; }
+        .form-group textarea { resize:vertical; min-height:70px; }
+        .file-input-wrapper { position:relative; overflow:hidden; display:inline-block; width:100%; }
+        .file-input-wrapper input[type=file] { position:absolute; left:-9999px; }
+        .file-input-label { display:block; padding:10px; background:#667eea; color:white; border-radius:6px; cursor:pointer; text-align:center; font-weight:600; transition:background 0.3s; }
+        .file-input-label:hover { background:#764ba2; }
+        .file-name { display:block; margin-top:6px; color:#666; font-size:0.83em; }
+        .button-group { display:flex; gap:10px; margin-top:16px; }
+        button { flex:1; padding:10px 16px; border:none; border-radius:6px; font-size:0.95em; font-weight:600; cursor:pointer; transition:all 0.3s; }
+        .btn-primary { background:#667eea; color:white; }
+        .btn-primary:hover { background:#764ba2; transform:translateY(-1px); }
+        .btn-secondary { background:#e9ecef; color:#333; }
+        .btn-secondary:hover { background:#dee2e6; }
+        .btn-danger { background:#dc3545; color:white; flex:0.5; }
+        .btn-danger:hover { background:#c82333; }
+        .btn-success { background:#28a745; color:white; }
+        .btn-success:hover { background:#218838; }
+        .ai-extraction { background:#fff3cd; border-left:4px solid #ffc107; padding:12px; border-radius:6px; margin-top:10px; }
+        .ai-extraction h4 { color:#856404; margin-bottom:6px; }
+        .ai-extraction p { color:#856404; font-size:0.88em; margin-bottom:8px; }
+        .tickets-list { max-height:500px; overflow-y:auto; }
+        .ticket-item { background:white; border-left:4px solid #667eea; padding:13px; margin-bottom:12px; border-radius:6px; box-shadow:0 2px 8px rgba(0,0,0,0.07); transition:transform 0.2s; }
+        .ticket-item:hover { transform:translateX(4px); }
+        .ticket-item.has-image { border-left-color:#28a745; }
+        .ticket-header { display:flex; justify-content:space-between; align-items:start; margin-bottom:8px; }
+        .ticket-date { font-weight:700; color:#667eea; }
+        .ticket-category { background:#667eea; color:white; padding:3px 10px; border-radius:20px; font-size:0.8em; font-weight:600; }
+        .ticket-price { font-size:1.2em; font-weight:700; color:#28a745; margin:6px 0; }
+        .ticket-type { font-size:0.86em; color:#666; margin-bottom:6px; }
+        .ticket-actions { display:flex; gap:8px; margin-top:8px; }
+        .ticket-actions button { flex:1; padding:6px 10px; font-size:0.8em; }
+        .btn-view-image { background:#17a2b8; color:white; }
+        .stats { background:white; padding:16px; border-radius:8px; margin-bottom:16px; box-shadow:0 2px 8px rgba(0,0,0,0.07); }
+        .stats h3 { color:#667eea; margin-bottom:12px; }
+        .stat-row { display:flex; justify-content:space-between; align-items:center; padding:9px 0; border-bottom:1px solid #eee; }
+        .stat-row:last-child { border-bottom:none; }
+        .stat-label { color:#666; font-weight:600; font-size:0.92em; }
+        .stat-value { font-size:1.15em; font-weight:700; color:#667eea; }
+        .stat-total { background:#f0f4ff; padding:10px; border-radius:6px; margin-top:10px; }
+        .stat-total .stat-value { color:#28a745; font-size:1.3em; }
+        .tab-buttons { display:flex; gap:6px; margin-bottom:16px; border-bottom:2px solid #e9ecef; }
+        .tab-btn { padding:9px 16px; background:none; border:none; border-bottom:3px solid transparent; cursor:pointer; font-weight:600; color:#666; transition:all 0.3s; font-size:0.9em; }
+        .tab-btn.active { color:#667eea; border-bottom-color:#667eea; }
+        .tab-content { display:none; }
+        .tab-content.active { display:block; animation:slideIn 0.3s; }
+        @keyframes slideIn { from{opacity:0;transform:translateY(8px);}to{opacity:1;transform:translateY(0);} }
+        @keyframes fadeIn { from{opacity:0;}to{opacity:1;} }
+        .alert { padding:12px; border-radius:6px; margin-bottom:16px; display:none; }
+        .alert.show { display:block; animation:fadeIn 0.3s; }
+        .alert-success { background:#d4edda; color:#155724; border:1px solid #c3e6cb; }
+        .alert-error { background:#f8d7da; color:#721c24; border:1px solid #f5c6cb; }
+        .modal { display:none; position:fixed; z-index:1000; left:0; top:0; width:100%; height:100%; background:rgba(0,0,0,0.5); animation:fadeIn 0.3s; }
+        .modal-content { background:#fefefe; margin:5% auto; padding:26px; border-radius:10px; width:90%; max-width:560px; box-shadow:0 4px 20px rgba(0,0,0,0.3); }
+        .modal-header { display:flex; justify-content:space-between; align-items:center; margin-bottom:16px; border-bottom:2px solid #667eea; padding-bottom:12px; }
+        .modal-header h2 { color:#667eea; }
+        .close { color:#aaa; font-size:24px; font-weight:bold; cursor:pointer; }
+        .close:hover { color:#000; }
+        .category-item { background:white; border:2px solid #ddd; padding:9px 13px; border-radius:6px; display:flex; justify-content:space-between; align-items:center; font-size:0.9em; margin-bottom:8px; }
+        .image-modal-content { text-align:center; }
+        .image-modal-content img { max-width:100%; max-height:560px; border-radius:8px; margin-top:16px; }
+
+        /* Admin app */
+        #adminScreen { display:none; }
+        .admin-container { max-width:1300px; margin:0 auto; background:white; border-radius:12px; box-shadow:0 20px 60px rgba(0,0,0,0.3); overflow:hidden; }
+        .admin-header { background:linear-gradient(135deg,#1a1a2e 0%,#16213e 50%,#0f3460 100%); color:white; padding:28px 36px; display:flex; align-items:center; gap:20px; }
+        .admin-header-icon { font-size:2.5em; }
+        .admin-header h1 { font-size:1.8em; margin-bottom:4px; }
+        .admin-header p { opacity:0.7; font-size:0.88em; }
+        .admin-body { padding:28px; }
+        .admin-filters { background:#f8f9fa; border-radius:10px; padding:20px; margin-bottom:24px; border:2px solid #e9ecef; display:flex; gap:16px; align-items:flex-end; flex-wrap:wrap; }
+        .admin-filters .form-group { margin-bottom:0; flex:1; min-width:200px; }
+        .admin-filters label { font-size:0.85em; color:#555; font-weight:600; display:block; margin-bottom:6px; }
+        .admin-filters select,.admin-filters input[type=month] { width:100%; padding:9px 12px; border:2px solid #ddd; border-radius:6px; font-size:0.95em; }
+        .admin-stats-row { display:grid; grid-template-columns:repeat(3,1fr); gap:16px; margin-bottom:24px; }
+        @media (max-width:700px) { .admin-stats-row { grid-template-columns:1fr; } }
+        .admin-stat-card { background:white; border-radius:10px; padding:20px; text-align:center; box-shadow:0 2px 12px rgba(0,0,0,0.08); border-top:4px solid #667eea; }
+        .admin-stat-card.green { border-top-color:#28a745; }
+        .admin-stat-card.purple { border-top-color:#764ba2; }
+        .admin-stat-number { font-size:2.2em; font-weight:800; color:#333; line-height:1; }
+        .admin-stat-label { font-size:0.82em; color:#888; margin-top:6px; font-weight:600; }
+        .admin-grid { display:grid; grid-template-columns:1fr 300px; gap:20px; }
+        @media (max-width:900px) { .admin-grid { grid-template-columns:1fr; } }
+        .admin-table-wrap { background:white; border-radius:10px; box-shadow:0 2px 12px rgba(0,0,0,0.08); overflow:hidden; }
+        .admin-table-header { padding:16px 20px; display:flex; justify-content:space-between; align-items:center; border-bottom:2px solid #f0f0f0; }
+        .admin-table-header h3 { color:#333; font-size:1em; }
+        .admin-table-actions { display:flex; gap:8px; }
+        .admin-table-actions button { flex:none; padding:7px 14px; font-size:0.82em; }
+        table.admin-table { width:100%; border-collapse:collapse; font-size:0.88em; }
+        table.admin-table th { background:#f8f9fa; color:#555; font-weight:700; padding:11px 14px; text-align:left; border-bottom:2px solid #e9ecef; }
+        table.admin-table td { padding:10px 14px; border-bottom:1px solid #f0f0f0; color:#333; vertical-align:middle; }
+        table.admin-table tr:hover td { background:#fafbff; }
+        .worker-badge { background:#e8eeff; color:#667eea; padding:3px 8px; border-radius:6px; font-size:0.82em; font-weight:600; }
+        .cat-pill { background:#f0f4ff; color:#764ba2; padding:2px 8px; border-radius:10px; font-size:0.8em; }
+        .price-cell { font-weight:700; color:#28a745; text-align:right; }
+        .admin-sidebar { display:flex; flex-direction:column; gap:14px; }
+        .worker-summary-card { background:white; border-radius:10px; padding:14px 16px; box-shadow:0 2px 8px rgba(0,0,0,0.07); border-left:4px solid #667eea; }
+        .worker-email { font-size:0.86em; color:#555; font-weight:600; margin-bottom:8px; word-break:break-all; }
+        .worker-stats { display:flex; justify-content:space-between; align-items:center; }
+        .worker-stats span { font-size:0.82em; color:#888; }
+        .worker-total { font-size:1.1em; font-weight:800; color:#28a745; }
+        .sidebar-title { font-size:0.9em; font-weight:700; color:#555; margin-bottom:4px; }
+
+        /* Loading */
+        #loadingOverlay { display:none; position:fixed; inset:0; background:rgba(0,0,0,0.45); z-index:99999; align-items:center; justify-content:center; flex-direction:column; gap:14px; color:white; font-size:1.05em; font-weight:600; }
+        .spinner { width:42px; height:42px; border:4px solid rgba(255,255,255,0.3); border-top:4px solid white; border-radius:50%; animation:spin 0.9s linear infinite; }
+        @keyframes spin { 0%{transform:rotate(0deg);}100%{transform:rotate(360deg);} }
+    </style>
+</head>
+<body>
+
+<!-- Loading -->
+<div id="loadingOverlay">
+    <div class="spinner"></div>
+    <span>Sincronizando con la nube...</span>
+</div>
+
+<!-- Auth -->
+<div id="authScreen">
+    <div class="auth-box">
+        <div class="auth-logo">🧾</div>
+        <h1>Tickets Laucirica</h1>
+        <p class="auth-subtitle">Gestión de gastos en la nube</p>
+        <h3 id="authTitle">Iniciar sesión</h3>
+        <div id="authError" class="auth-error"></div>
+        <input type="email" id="authEmail" class="auth-input" placeholder="Email" autocomplete="email">
+        <input type="password" id="authPassword" class="auth-input" placeholder="Contraseña" autocomplete="current-password">
+        <div id="adminCodeGroup" class="admin-code-group">
+            <label>🔑 Código de administrador (opcional, solo al registrarse como admin)</label>
+            <input type="password" id="adminCode" class="auth-input" placeholder="Código secreto de administrador" style="margin-bottom:0;">
+        </div>
+        <button id="authSubmitBtn" class="auth-btn" onclick="window.submitAuth()">Entrar</button>
+        <p class="auth-switch">
+            <span id="authSwitchText">¿No tienes cuenta?</span>
+            <a id="authSwitchLink" onclick="window.switchAuthMode()">Registrarse</a>
+        </p>
+    </div>
+</div>
+
+<!-- Worker App -->
+<div id="appScreen">
+    <div style="max-width:1200px;margin:0 auto;">
+        <div class="user-bar">
+            <span>☁️ <strong id="userEmail"></strong></span>
+            <button class="btn-logout" onclick="window.logout()">Cerrar sesión</button>
+        </div>
+    </div>
+    <div class="container">
+        <div class="header">
+            <h1>🧾 Tickets Laucirica</h1>
+            <p>Gestiona tus gastos y genera reportes en PDF</p>
+            <span class="cloud-badge">☁️ Datos sincronizados en la nube</span>
+        </div>
+        <div class="content">
+            <div class="panel">
+                <h2>Nuevo Ticket</h2>
+                <div id="alert" class="alert"></div>
+                <div class="form-group"><label>📅 Fecha</label><input type="date" id="date" required></div>
+                <div class="form-group"><label>💵 Precio (€)</label><input type="number" id="price" step="0.01" min="0" placeholder="0.00" required></div>
+                <div class="form-group"><label>🏷️ Categoría</label><select id="category" required><option value="">-- Selecciona una categoría --</option></select></div>
+                <div class="form-group"><label>📋 Tipo</label><select id="type" required><option value="">-- Selecciona tipo --</option><option value="Ticket">Ticket</option><option value="Factura">Factura</option></select></div>
+                <div class="form-group"><label>📝 Notas (opcional)</label><textarea id="notes" placeholder="Descripción adicional..."></textarea></div>
+                <div class="form-group">
+                    <label>📸 Foto del recibo (opcional)</label>
+                    <div class="file-input-wrapper">
+                        <input type="file" id="imageInput" accept="image/*">
+                        <label for="imageInput" class="file-input-label">Selecciona una imagen</label>
+                        <span class="file-name" id="fileName"></span>
+                    </div>
+                    <div id="imagePreview"></div>
+                </div>
+                <div id="aiExtraction" class="ai-extraction" style="display:none;">
+                    <h4>🤖 Extracción IA</h4>
+                    <p>Se detectaron posibles datos en la imagen:</p>
+                    <button class="btn-secondary" onclick="window.applyAIExtraction()" style="width:100%;margin-top:8px;">✓ Aplicar sugerencias</button>
+                </div>
+                <div class="button-group">
+                    <button class="btn-primary" onclick="window.addTicket()">+ Agregar Ticket</button>
+                    <button class="btn-secondary" onclick="window.clearForm()">Limpiar</button>
+                </div>
+                <hr style="margin:18px 0;border:none;border-top:2px solid #ddd;">
+                <h3 style="color:#667eea;margin-bottom:10px;">⚙️ Categorías</h3>
+                <button class="btn-secondary" onclick="window.openCategoryModal()" style="width:100%;">Gestionar Categorías</button>
+            </div>
+            <div class="panel">
+                <div class="tab-buttons">
+                    <button class="tab-btn active" onclick="window.switchTab('stats',this)">📊 Resumen</button>
+                    <button class="tab-btn" onclick="window.switchTab('list',this)">📋 Listado</button>
+                    <button class="tab-btn" onclick="window.switchTab('export',this)">💾 Exportar</button>
+                </div>
+                <div id="stats" class="tab-content active">
+                    <div class="stats">
+                        <h3>Estadísticas del Mes</h3>
+                        <div class="stat-row"><span class="stat-label">Total tickets:</span><span class="stat-value" id="ticketCount">0</span></div>
+                        <div class="stat-row"><span class="stat-label">Tickets:</span><span class="stat-value" id="ticketTypeCount">0</span></div>
+                        <div class="stat-row"><span class="stat-label">Facturas:</span><span class="stat-value" id="invoiceTypeCount">0</span></div>
+                        <div class="stat-total"><div class="stat-row"><span class="stat-label">💰 Total Gastos:</span><span class="stat-value" id="totalAmount">€0.00</span></div></div>
+                    </div>
+                </div>
+                <div id="list" class="tab-content">
+                    <h3 style="color:#667eea;margin-bottom:12px;">Tickets del Mes Actual</h3>
+                    <div class="tickets-list" id="ticketsList"></div>
+                </div>
+                <div id="export" class="tab-content">
+                    <h3 style="color:#667eea;margin-bottom:12px;">Opciones de Exportación</h3>
+                    <div class="form-group"><label>Mes y año:</label><input type="month" id="monthYear"></div>
+                    <div class="button-group" style="flex-direction:column;">
+                        <button class="btn-success" onclick="window.generatePDF()">📄 Descargar PDF</button>
+                        <button class="btn-secondary" onclick="window.exportJSON()">💾 Descargar JSON</button>
+                        <button class="btn-secondary" onclick="window.exportCSV()">📊 Descargar CSV</button>
+                        <button class="btn-danger" onclick="window.clearAllData()" style="margin-top:16px;flex:1;">🗑️ Borrar todos mis datos</button>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Admin App -->
+<div id="adminScreen">
+    <div style="max-width:1300px;margin:0 auto;">
+        <div class="user-bar">
+            <span>👑 <strong id="adminEmail"></strong> <span class="admin-crown">ADMIN</span></span>
+            <button class="btn-logout" onclick="window.logout()">Cerrar sesión</button>
+        </div>
+    </div>
+    <div class="admin-container">
+        <div class="admin-header">
+            <div class="admin-header-icon">👑</div>
+            <div>
+                <h1>Panel de Administración</h1>
+                <p>Tickets Laucirica · Todos los trabajadores</p>
+            </div>
+        </div>
+        <div class="admin-body">
+            <div id="adminAlert" class="alert"></div>
+            <div class="admin-filters">
+                <div class="form-group">
+                    <label>👥 Trabajador</label>
+                    <select id="adminUserFilter"><option value="all">Todos los trabajadores</option></select>
+                </div>
+                <div class="form-group">
+                    <label>📅 Mes</label>
+                    <input type="month" id="adminMonthFilter">
+                </div>
+                <button class="btn-primary" onclick="window.applyAdminFilters()" style="flex:none;padding:10px 24px;">🔍 Filtrar</button>
+            </div>
+            <div class="admin-stats-row">
+                <div class="admin-stat-card">
+                    <div class="admin-stat-number" id="adminTotalTickets">0</div>
+                    <div class="admin-stat-label">🧾 TICKETS</div>
+                </div>
+                <div class="admin-stat-card green">
+                    <div class="admin-stat-number" id="adminTotalAmount">€0.00</div>
+                    <div class="admin-stat-label">💰 TOTAL GASTOS</div>
+                </div>
+                <div class="admin-stat-card purple">
+                    <div class="admin-stat-number" id="adminTotalWorkers">0</div>
+                    <div class="admin-stat-label">👤 TRABAJADORES</div>
+                </div>
+            </div>
+            <div class="admin-grid">
+                <div class="admin-table-wrap">
+                    <div class="admin-table-header">
+                        <h3>📋 Listado de tickets</h3>
+                        <div class="admin-table-actions">
+                            <button class="btn-success" onclick="window.adminGeneratePDF()">📄 PDF</button>
+                            <button class="btn-secondary" onclick="window.adminExportCSV()">📊 CSV</button>
+                        </div>
+                    </div>
+                    <div style="overflow-x:auto;">
+                        <table class="admin-table">
+                            <thead><tr><th>Trabajador</th><th>Fecha</th><th>Categoría</th><th>Tipo</th><th>Notas</th><th style="text-align:right;">Importe</th></tr></thead>
+                            <tbody id="adminTicketsBody"><tr><td colspan="6" style="text-align:center;color:#999;padding:30px;">Cargando...</td></tr></tbody>
+                        </table>
+                    </div>
+                </div>
+                <div class="admin-sidebar">
+                    <div class="sidebar-title">📊 Resumen por trabajador</div>
+                    <div id="adminWorkerSummary"></div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Modal Categorías -->
+<div id="categoryModal" class="modal">
+    <div class="modal-content">
+        <div class="modal-header"><h2>Gestionar Categorías</h2><span class="close" onclick="window.closeCategoryModal()">&times;</span></div>
+        <div class="form-group">
+            <label>Nueva categoría:</label>
+            <div style="display:flex;gap:10px;">
+                <input type="text" id="newCategory" placeholder="Ej: Transporte" style="flex:1;padding:10px;border:2px solid #ddd;border-radius:6px;font-size:1em;">
+                <button class="btn-primary" onclick="window.addCategory()" style="flex:0.3;">Añadir</button>
+            </div>
+        </div>
+        <h3 style="margin-top:16px;margin-bottom:10px;color:#667eea;">Categorías actuales:</h3>
+        <div id="categoryList"></div>
+        <button class="btn-secondary" onclick="window.closeCategoryModal()" style="width:100%;margin-top:16px;">Cerrar</button>
+    </div>
+</div>
+
+<!-- Modal Imagen -->
+<div id="imageModal" class="modal">
+    <div class="modal-content image-modal-content">
+        <div class="modal-header"><h2>Vista de Imagen</h2><span class="close" onclick="window.closeImageModal()">&times;</span></div>
+        <img id="modalImage" src="" alt="Ticket image">
+    </div>
+</div>
+
+</body>
+</html>
